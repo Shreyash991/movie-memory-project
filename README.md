@@ -28,7 +28,7 @@ docker compose up -d
 This starts Postgres on `localhost:5432` with two databases: `movie_memory` for the app and `movie_memory_test` for the tests. The test database is created by `docker/init-test-db.sql` the first time the Docker volume is created. If you already had the volume, run `docker compose down -v` first.
 
 **On Windows**, Docker Desktop runs on WSL 2, which needs hardware virtualization. On my machine Docker wouldn't start at first ("failed to connect to the docker API"). What fixed it:
-1. Turn on virtualization in the BIOS/UEFI. It's usually called Intel VT-x or AMD SVM, and it was off by default on my laptop.
+1. Turn on virtualization in the BIOS/UEFI. It's usually called Intel VT-x or AMD SVM, and it was turned off on my machine.
 2. Turn on WSL 2: run `wsl --install` in an admin PowerShell, then restart.
 3. Start Docker Desktop and wait until it says the engine is running, then run `docker compose up -d` again.
 
