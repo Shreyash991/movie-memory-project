@@ -2,6 +2,7 @@ import Image from "next/image";
 import { redirect } from "next/navigation";
 import { signOut } from "@/auth";
 import { requireUser } from "@/lib/session";
+import { MovieFact } from "./movie-fact";
 
 export default async function DashboardPage() {
   const user = await requireUser();
@@ -56,6 +57,13 @@ export default async function DashboardPage() {
           Favorite movie
         </h2>
         <p className="mt-1 text-2xl font-semibold">{user.favoriteMovie}</p>
+      </section>
+
+      <section className="rounded-lg border border-slate-200 bg-white p-6">
+        <h2 className="mb-2 text-sm font-medium uppercase tracking-wide text-slate-500">
+          Fun fact
+        </h2>
+        <MovieFact />
       </section>
     </main>
   );
