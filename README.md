@@ -27,6 +27,13 @@ docker compose up -d
 ```
 This starts Postgres on `localhost:5432` with two databases: `movie_memory` for the app and `movie_memory_test` for the tests. The test database is created by `docker/init-test-db.sql` the first time the Docker volume is created. If you already had the volume, run `docker compose down -v` first.
 
+**On Windows**, Docker Desktop runs on WSL 2, which needs hardware virtualization. On my machine Docker wouldn't start at first ("failed to connect to the docker API"). What fixed it:
+1. Turn on virtualization in the BIOS/UEFI. It's usually called Intel VT-x or AMD SVM, and it was off by default on my laptop.
+2. Turn on WSL 2: run `wsl --install` in an admin PowerShell, then restart.
+3. Start Docker Desktop and wait until it says the engine is running, then run `docker compose up -d` again.
+
+If you'd rather skip Docker, any Postgres 14+ works. Point `DATABASE_URL` at it, and create a `movie_memory_test` database for the tests.
+
 ### 3. Run database migrations
 ```bash
 npm run db:migrate   # development: prisma migrate dev (applies migrations, regenerates the client)
@@ -195,8 +202,8 @@ It's also the kind of problem I enjoy thinking through. What happens if two requ
 I used Claude Code for most of this project, roughly the way I'd work with a pair programmer: I made the decisions, it did a lot of the typing, and I checked what it produced.
 
 - **Plan first, then small steps.** I gave it the spec along with my own constraints: Variant A, all fact logic in one file, a Postgres advisory lock inside a Prisma transaction with a re-check after locking, a timeout on OpenAI, the user id taken only from the session, Zod for validation and Vitest for tests. I had it write out a plan for me to review before any code, then we built it one step at a time with a commit after each step.
-- **First drafts.** It wrote most of the first versions: project setup, schema, Auth.js config, pages, the fact logic, tests and this README. I read through each step and asked about anything I didn't follow, especially the locking, until I could explain it myself.
+- **First drafts.** It wrote most of the first versions: project setup, schema, Auth.js config, pages, the fact logic and tests, and it helped me draft the docs. I read through each step and asked about anything I didn't follow, especially the locking, until I could explain it myself.
 - **Two bugs it caught that I wouldn't have spotted quickly.** Postgres `now()` inside a transaction returns the time the transaction *started*, so facts saved after waiting on the lock would expire early. And time spent waiting for a lock counts toward Prisma's transaction timeout. Both fixes are commented in `lib/facts.ts`.
 - **Checking its work instead of trusting it.** Passing tests weren't enough on their own, so I had it remove the lock and rerun the concurrency test. It failed with two OpenAI calls, which shows the test really checks the lock. Every step also had to pass type checks, lint and a build. I also went through the whole app by hand in the browser: sign-in, input validation, the 60-second cache, rapid refreshes across tabs, OpenAI failure with a bad key, and logout.
-- **Where it got things wrong.** Nothing serious, but enough to keep me reading carefully. Its first README draft said I'd tested sign-in by hand before I actually had, so I took that line out until it was true. It gave me a Linux `grep` command for Windows PowerShell, and a push command for a `master` branch when mine was `main`. And when I wasn't sure what one of my manual test steps was meant to show, it turned out the step was worded loosely, so we rewrote it. None of these were hard to catch, but they're why I treat its output as a draft and not an answer.
+- **Where it got things wrong.** Mostly small things, but enough that I read every command before letting it run. At one point it tried to stop its own dev server by killing every Node process on my machine, which would have taken my editor down too. My permission settings blocked it, and it narrowed the command to the one port it was using. It also gave me commands that didn't fit my setup, like a Linux `grep` in Windows PowerShell and a push to `master` when my branch was `main`. None of this was hard to catch, but it's why I treat its output as a draft, not a final answer.
 - **What I'd keep doing.** Making it explain its reasoning before writing code, and asking it how I'd prove something works (like the "remove the lock" check) rather than just asking it to write tests. The parts I most needed to understand myself, the cache window and the locking, are also the parts I questioned it hardest on.
