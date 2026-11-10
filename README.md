@@ -4,7 +4,7 @@ Sign in with Google, tell us your favorite movie, and get a fun fact about it fr
 
 **Stack:** Next.js 15 (App Router) · TypeScript · React 19 · Tailwind CSS 4 · Postgres 16 · Prisma 6 · Auth.js v5 (Google) · OpenAI · Zod · Vitest
 
-**Variant chosen: A (backend: caching and correctness).** See [Why Variant A](#why-variant-a).
+**Variant chosen: A (backend: caching and correctness).** See [Which variant I chose and why](#which-variant-i-chose-and-why).
 
 ---
 
@@ -156,33 +156,47 @@ The tests run against a real Postgres database (`movie_memory_test`), because mo
 
 ---
 
-## Why Variant A
+## Which variant I chose and why
 
-What this product really has to get right is the fact pipeline. That's where the money is spent (OpenAI calls), where things fail (an external API), and where concurrency bugs show up (refreshes, several tabs). Variant A turns those risks into concrete guarantees that tests can check. The cache window, burst protection and fallbacks are easier to reason about, and more interesting to defend, as backend logic with database-level guarantees than as client-side state.
+I went with Variant A.
+
+Most of the risk in this app sits in one place: getting a fact. It's the only part that costs money, the only part that depends on a service I don't control, and the only part where two requests can step on each other (someone mashing refresh, or the dashboard open in two tabs). I wanted to spend my time making that part solid and provably correct, with tests that run against a real database, rather than adding more UI.
+
+It's also the kind of problem I enjoy thinking through. What happens if two requests land at the same moment? What if OpenAI hangs? What does the user see when it fails?
 
 ## Key tradeoffs
 
-- **A database transaction stays open across the OpenAI call.** This keeps the lock, the re-check and the insert atomic and simple. The cost is one pooled database connection per in-flight generation, for up to about 10s. That's fine at this scale. Under heavy load it could exhaust the Prisma pool, and the fix would be a "generation lease" row (see below).
-- **Advisory lock instead of a unique constraint per 60s window.** A bucketed unique constraint has edge cases at bucket boundaries (a 59s-old fact can be in the previous bucket) and doesn't stop the duplicate OpenAI *call*, only the duplicate insert. The lock prevents the call itself.
-- **Failure fallbacks are served silently.** The spec asks for "the most recent cached fact" on failure, so the response looks the same as a normal one. The user isn't told the fact is old.
-- **Facts are kept forever.** At most one row per user per minute while they're active. That's simple and gives history, but it would need pruning eventually.
-- **Database sessions instead of JWT.** One extra query per request, in exchange for revocable sessions and no user data in the cookie.
-- **Profile data comes from the first sign-in.** Auth.js doesn't update `name` or `image` on later sign-ins by default.
-- **The clock comes from the app server.** With several app servers, their clocks need to be in sync (NTP) for the 60s window to be exact.
+**Holding a transaction open while OpenAI responds.** The lock, the re-check and the insert all happen in one transaction, which keeps the code short and easy to follow. The downside is that each generation in progress holds a DB connection for up to 10 seconds. For an app this size that's fine. With real traffic it could drain the connection pool, and I'd switch to the approach in the next section.
 
-## With 2 more hours
+**Advisory lock instead of a unique constraint.** I considered a unique constraint on (user, 60-second bucket). It stops duplicate rows but not duplicate OpenAI calls: both requests would still hit the API and one insert would just fail. Fixed buckets also don't match "less than 60 seconds old", since a fact from 5 seconds ago can fall in the previous bucket. The lock stops the second call from happening at all.
 
-1. Replace "transaction held across OpenAI" with a short transaction that claims a `FactGeneration` lease row (with an expiry), then generate outside the transaction. This frees database connections during the network call.
-2. Add `source: "cache" | "generated" | "stale"` to the API response and show "showing an earlier fact" in the UI when serving a fallback.
-3. Add a CI workflow (GitHub Actions with a Postgres service) running lint, typecheck, build and tests.
-4. Add a Playwright end-to-end test of the sign-in → onboarding → dashboard flow, with a stubbed OAuth provider.
-5. Prune facts older than N days, and refresh the Google name and photo on each sign-in.
+**Stale facts are returned without telling the user.** When OpenAI fails I return the last fact, as the spec asks. Right now that response looks exactly like a fresh one, so the user can't tell it's old.
+
+**Facts are never deleted.** It's simple and keeps the history, but the table grows by up to one row per active user per minute. Eventually it would need a cleanup job.
+
+**Database sessions instead of JWTs.** This costs one extra query per request. In return I can end a session by deleting a row, and no user data lives in the cookie.
+
+**Name and photo are saved at first sign-in.** Auth.js doesn't refresh them later, so if someone changes their Google photo, the app won't pick it up.
+
+**Time comes from the app server.** I set `createdAt` in code because Postgres `now()` is frozen for the whole transaction, which would make facts look older than they are. The catch is that several app servers would need synced clocks. That's fine with one server, and worth knowing if there are more.
+
+## What I'd improve with 2 more hours
+
+1. Stop holding a transaction during the OpenAI call. Instead, briefly claim a "generation in progress" row with an expiry, release the connection, call OpenAI, then save the result. Same guarantee, without tying up the pool.
+2. Tell the client where the fact came from (`cache`, `generated` or `stale`) and show a small "this is an older fact" note when OpenAI is down.
+3. Set up GitHub Actions to run lint, type checks, the build and the tests against a Postgres service on every push.
+4. Add one Playwright test for the whole sign-in → onboarding → dashboard flow, using a fake OAuth provider. Right now that flow is only tested by hand.
+5. Clean up old facts, and refresh the Google name and photo on each login.
 
 ---
 
 ## AI usage
 
-- Used **Claude Code** as a pair programmer throughout. I set the requirements and the key decisions: Variant A, a Postgres advisory lock inside a Prisma transaction with a second cache check, an OpenAI timeout, the user id only from the session, Zod, Vitest, and step-by-step commits. I had it propose a plan before writing code.
-- It drafted the scaffold, schema, Auth.js setup, pages, `lib/facts.ts`, tests and this README. I reviewed each step before moving on.
-- It flagged two subtle issues that I kept: Postgres `now()` is frozen at the start of a transaction (so `createdAt` is set in app code), and lock waits count toward Prisma's transaction timeout (so the timeouts were sized together and bounded with `lock_timeout`).
-- Checks: typecheck, lint and build after every step. All tests pass against a real Postgres. A mutation check showed that removing the advisory lock makes the burst test fail. Checked the OpenAI key with a single live call.
+I used Claude Code for most of this project, roughly the way I'd work with a pair programmer: I made the decisions, it did a lot of the typing, and I checked what it produced.
+
+- **Plan first, then small steps.** I gave it the spec along with my own constraints: Variant A, all fact logic in one file, a Postgres advisory lock inside a Prisma transaction with a re-check after locking, a timeout on OpenAI, the user id taken only from the session, Zod for validation and Vitest for tests. I had it write out a plan for me to review before any code, then we built it one step at a time with a commit after each step.
+- **First drafts.** It wrote most of the first versions: project setup, schema, Auth.js config, pages, the fact logic, tests and this README. I read through each step and asked about anything I didn't follow, especially the locking, until I could explain it myself.
+- **Two bugs it caught that I wouldn't have spotted quickly.** Postgres `now()` inside a transaction returns the time the transaction *started*, so facts saved after waiting on the lock would expire early. And time spent waiting for a lock counts toward Prisma's transaction timeout. Both fixes are commented in `lib/facts.ts`.
+- **Checking its work instead of trusting it.** Passing tests weren't enough on their own, so I had it remove the lock and rerun the concurrency test. It failed with two OpenAI calls, which shows the test really checks the lock. Every step also had to pass type checks, lint and a build. I also went through the whole app by hand in the browser: sign-in, input validation, the 60-second cache, rapid refreshes across tabs, OpenAI failure with a bad key, and logout.
+- **Where it got things wrong.** Nothing serious, but enough to keep me reading carefully. Its first README draft said I'd tested sign-in by hand before I actually had, so I took that line out until it was true. It gave me a Linux `grep` command for Windows PowerShell, and a push command for a `master` branch when mine was `main`. And when I wasn't sure what one of my manual test steps was meant to show, it turned out the step was worded loosely, so we rewrote it. None of these were hard to catch, but they're why I treat its output as a draft and not an answer.
+- **What I'd keep doing.** Making it explain its reasoning before writing code, and asking it how I'd prove something works (like the "remove the lock" check) rather than just asking it to write tests. The parts I most needed to understand myself, the cache window and the locking, are also the parts I questioned it hardest on.
